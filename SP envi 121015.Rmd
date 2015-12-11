@@ -1,0 +1,701 @@
+---
+title: "SP Environmental Varaibles"
+author: "Megan A. Rua"
+date: "12/10/2015"
+output: 
+  pdf_document:
+    includes:
+      usepackage: longtable
+    latex_engine: xelatex
+  html_document: default
+---
+
+
+For this analysis I will be exploring how environmental characterstics vary among the sites. I will use correlation and principal components analysis to condense this variation into a single component for future tests again fungal community structure.
+
+Necessary Functions
+-------------------------------------------------
+
+Load necessary functions for plotting
+```{r}
+#Function for multiple ggplots
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  library(grid)
+
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+
+  numPlots = length(plots)
+
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+
+#function to replicate ggplot color hues with other plotting
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length=n+1)
+  hcl(h=hues, l=65, c=100)[1:n]
+}
+
+#Function to calculate error bars
+summarySE <- function(data=NULL, measurevar, groupvars=NULL, na.rm=FALSE,
+                      conf.interval=.95, .drop=TRUE) {
+require(plyr)
+# New version of length which can handle NA's: if na.rm==T, don't count them
+    length2 <- function (x, na.rm=FALSE) {
+        if (na.rm) sum(!is.na(x))
+        else       length(x)
+    }
+
+# This does the summary. For each group's data frame, return a vector with
+    # N, mean, and sd
+    datac <- ddply(data, groupvars, .drop=.drop,
+      .fun = function(xx, col) {
+        c(N    = length2(xx[[col]], na.rm=na.rm),
+          mean = mean   (xx[[col]], na.rm=na.rm),
+          sd   = sd     (xx[[col]], na.rm=na.rm)
+        )
+      },
+      measurevar
+    )
+
+# Rename the "mean" column    
+datac <- rename(datac, c("mean" = measurevar))
+# Calculate standard error of the mean
+datac$se <- datac$sd / sqrt(datac$N) 
+
+# Confidence interval multiplier for standard error
+# Calculate t-statistic for confidence interval: 
+# e.g., if conf.interval is .95, use .975 (above/below), and use df=N-1
+    ciMult <- qt(conf.interval/2 + .5, datac$N-1)
+    datac$ci <- datac$se * ciMult
+
+    return(datac)
+}
+
+normDataWithin <- function(data=NULL, idvar, measurevar, betweenvars=NULL,
+                           na.rm=FALSE, .drop=TRUE) {
+require(plyr)
+
+# Measure var on left, idvar + between vars on right of formula.
+    data.subjMean <- ddply(data, c(idvar, betweenvars), .drop=.drop,
+     .fun = function(xx, col, na.rm) {
+        c(subjMean = mean(xx[,col], na.rm=na.rm))
+      },
+      measurevar,
+      na.rm
+    )
+
+# Put the subject means with original data
+    data <- merge(data, data.subjMean)
+
+    # Get the normalized data in a new column
+    measureNormedVar <- paste(measurevar, "_norm", sep="")
+    data[,measureNormedVar] <- data[,measurevar] - data[,"subjMean"] +
+                               mean(data[,measurevar], na.rm=na.rm)
+
+    # Remove this subject mean column
+    data$subjMean <- NULL
+
+    return(data)
+}
+
+summarySEwithin <- function(data=NULL, measurevar, betweenvars=NULL, withinvars=NULL,
+                            idvar=NULL, na.rm=FALSE, conf.interval=.95, .drop=TRUE) {
+
+  # Ensure that the betweenvars and withinvars are factors
+  factorvars <- vapply(data[, c(betweenvars, withinvars), drop=FALSE],
+    FUN=is.factor, FUN.VALUE=logical(1))
+
+  if (!all(factorvars)) {
+    nonfactorvars <- names(factorvars)[!factorvars]
+    message("Automatically converting the following non-factors to factors: ",
+            paste(nonfactorvars, collapse = ", "))
+    data[nonfactorvars] <- lapply(data[nonfactorvars], factor)
+  }
+
+# Get the means from the un-normed data
+  datac <- summarySE(data, measurevar, 
+                     groupvars=c(betweenvars, withinvars),na.rm=na.rm,
+                     conf.interval=conf.interval, .drop=.drop)
+
+# Drop all the unused columns (these will be calculated with normed data)
+  datac$sd <- NULL
+  datac$se <- NULL
+  datac$ci <- NULL
+
+  # Norm each subject's data
+  ndata <- normDataWithin(data, idvar, measurevar, betweenvars, na.rm, .drop=.drop)
+
+  # This is the name of the new column
+  measurevar_n <- paste(measurevar, "_norm", sep="")
+
+  # Collapse the normed data - now we can treat between and within vars the same
+  ndatac <- summarySE(ndata, measurevar_n, 
+                      groupvars=c(betweenvars, withinvars),na.rm=na.rm,
+                      conf.interval=conf.interval, .drop=.drop)
+
+# Apply correction from Morey (2008) to the standard error and confidence interval
+#  Get the product of the number of conditions of within-S variables
+  nWithinGroups    <- prod(vapply(ndatac[,withinvars, drop=FALSE], 
+                                  FUN=nlevels,FUN.VALUE=numeric(1)))
+  correctionFactor <- sqrt( nWithinGroups / (nWithinGroups-1) )
+
+  # Apply the correction factor
+  ndatac$sd <- ndatac$sd * correctionFactor
+  ndatac$se <- ndatac$se * correctionFactor
+  ndatac$ci <- ndatac$ci * correctionFactor
+
+  # Combine the un-normed means with the normed results
+  merge(datac, ndatac)
+}
+```
+
+Dataset Construction
+-------------------------------------------------
+
+For this analysis will need the following data:
+  * Variety = Pinus clausa var. immuginata, Pinus clausa var. clausa
+  * Site = collection location (Alligator Point, Big Lagoon State Park, Cedar Key Scrub State Reserve, Eglin Air Force Base, Englewood,              Henderson Beach State Park, Highlands Hammock State Park, Jonathan Dickinson State Park, Ocala National Forest, St. Joseph Peninsula State Park)
+  
+I will possibly use the following variables to characterize each site:  
+
+  * Texture Class = W_TEX_CLASS (from the WISE database) or TEX_CLASS (from HWSD) [categorical]
+  * Drainage = W_DRAIN [categorical]
+  * W_WATER = soil water content: W_WATER [continuous]
+  * Soil texture measurements = W_SAND, W_SILT, W_CLAY [continuous (%)]
+  * Exchangeable Sodium % = W_ESP [continuous (ESP)]
+  * pH = TOPPH [continuous]
+  * Organic Carbon Content = W_OC [continuous (g C kg-1)]
+  * Total N = W_N [continuous (g kg-1)]
+  * C/N Ratio = W_CN [continuous]
+  * Annual Mean Temperature = MeanTemp [continuous (ºC)]
+  * Annual Precipitation = MeanPrecip [continuous (mm)]
+
+```{r}
+#NIMBioS
+SP.envi<-read.csv('/home/megan.rua/Dropbox/Experiments/2013 Sand Pine/Analyses/Spatial Data/FL_samp_envi.csv',header=T,sep=",")
+```
+
+```{r message=FALSE, warning=FALSE}
+library(vegan)
+#Bray-Curtis Method for Community Data
+SP.envi.ad<-adonis(SP.envi[,c("W_WATER","W_SAND","W_SILT", "W_CLAY","W_ESP","TOPPH","W_OC","W_N","W_CN","MeanTemp","MeanPrecip")]~Variety,data=SP.envi,perm=999,method="bray")
+SP.envi.ad
+```
+
+Test those patterns and visualize more cleanly:
+```{r warning=FALSE, results="asis",echo=FALSE}
+library(plsdepot)
+envi.cor<-nipals(SP.envi[,c("W_WATER","W_SAND","W_SILT", "W_CLAY","W_ESP","TOPPH","W_OC","W_N","W_CN","MeanTemp","MeanPrecip")])
+#plot circle
+plot(envi.cor,main="Circle of Correlation",cex.main=1)
+
+envi.cor<-cor(SP.envi[,c("W_WATER","W_SAND","W_SILT", "W_CLAY","W_ESP","TOPPH","W_OC","W_N","W_CN","MeanTemp","MeanPrecip")])
+
+library(xtable)
+print(xtable(envi.cor,caption="Raw Correlation Valyes for Environmental Variables",digits=4))
+```
+
+\clearpage
+
+Do these variables differ by Variety?
+-------------------------------------------------
+
+Visualize the relationship:
+```{r fig.width=11, fig.height=8.5}
+#graph - shows patterns relate pretty strongly to site
+pairs(SP.envi[c("W_WATER","W_SAND","W_SILT", "W_CLAY","W_ESP","TOPPH","W_OC","W_N","W_CN","MeanTemp","MeanPrecip")],
+      main="Scatterplot for Enviormental Data",pch=22, bg=gg_color_hue(2)[unclass(SP.envi$Variety)],oma=c(2,2,6,2))
+par(xpd=TRUE)
+legend(0.75,1.2, as.vector(unique(SP.envi$Variety)), fill=gg_color_hue(2),bty="n", cex=0.75)
+```
+Clear patterns based on variety!
+
+\clearpage
+
+Individual linear models (essentially t-tests):
+```{r}
+library(nlme)
+SP.water<-lm(SP.envi$W_WATER~SP.envi$Variety,data=SP.envi)
+anova(SP.water)
+SP.silt<-lm(SP.envi$W_SILT~SP.envi$Variety,data=SP.envi)
+anova(SP.silt)
+SP.sand<-lm(SP.envi$W_SAND~SP.envi$Variety,data=SP.envi)
+anova(SP.sand)
+SP.clay<-lm(SP.envi$W_CLAY~SP.envi$Variety,data=SP.envi)
+anova(SP.clay)
+SP.ESP<-lm(SP.envi$W_ESP~SP.envi$Variety,data=SP.envi)
+anova(SP.ESP)
+SP.pH<-lm(SP.envi$TOPPH~SP.envi$Variety,data=SP.envi)
+anova(SP.pH)
+SP.OC<-lm(SP.envi$W_OC~SP.envi$Variety,data=SP.envi)
+anova(SP.OC)
+SP.N<-lm(SP.envi$W_N~SP.envi$Variety,data=SP.envi)
+anova(SP.N)
+SP.CN<-lm(SP.envi$W_CN~SP.envi$Variety,data=SP.envi)
+anova(SP.CN)
+SP.temp<-lm(SP.envi$MeanTemp~SP.envi$Variety,data=SP.envi)
+anova(SP.temp)
+SP.precip<-lm(SP.envi$MeanPrecip~SP.envi$Variety,data=SP.envi)
+anova(SP.precip)
+```
+
+Number of variables that appear to differ between the varieties: Precipitation (p<0.0001), Temperature (p<0.0001), Organic Carbon Content (p=0.0112), % silt (p=0.0679).
+
+Appropriate Plot:
+```{r message=FALSE}
+library(reshape2)
+SP.envi.long <- melt(data=SP.envi, id.var=c("ID","Variety"),
+                  measure.vars=c("W_WATER","W_SAND","W_SILT", "W_CLAY","W_ESP","TOPPH","W_OC","W_N","W_CN","MeanTemp","MeanPrecip"),
+                  variable.name="Envi")
+
+SP.envi.long.se<-summarySEwithin(SP.envi.long, measurevar="value", withinvars=c("Variety","Envi"), idvar="ID")
+SP.envi.wide<-dcast(SP.envi.long.se, Variety ~ Envi, value.var="value")
+SP.envi.wide.se <-dcast(SP.envi.long.se, Variety~ Envi, value.var="se")
+
+fig.dat<-cbind(SP.envi.wide,SP.envi.wide.se[2:12])
+colnames(fig.dat)<-c("Variety","W_WATER","W_SAND","W_SILT", "W_CLAY","W_ESP","TOPPH","W_OC","W_N","W_CN","MeanTemp","MeanPrecip",
+                     "W_WATER.se","W_SAND.se","W_SILT.se", "W_CLAY.se","W_ESP.se","TOPPH.se","W_OC.se","W_N.se","W_CN.se",
+                     "MeanTemp.se","MeanPrecip.se")
+
+library(scales)
+library(ggplot2)
+p1<-ggplot(fig.dat,aes(Variety,W_SILT,fill=as.factor(Variety)))+
+   geom_bar(position="dodge",stat="identity") +
+   geom_bar(position=position_dodge(.9), colour="black", stat="identity") +
+   geom_errorbar(position=position_dodge(.9), width=.25, 
+          aes(ymin=W_SILT-W_SILT.se, ymax=W_SILT+W_SILT.se)) +
+   labs(y="% Silt") +
+   scale_y_continuous(limits = c(0, 35))+
+   theme_bw()+
+   #theme(strip.text.x = element_blank()) +
+   theme(legend.position="none",axis.title.x = element_blank(),
+         axis.text.x=element_blank(),axis.ticks=element_blank()) 
+
+p2<-ggplot(fig.dat,aes(Variety,W_SAND,fill=as.factor(Variety)))+
+   geom_bar(position="dodge",stat="identity") +
+   geom_bar(position=position_dodge(.9), colour="black", stat="identity") +
+   geom_errorbar(position=position_dodge(.9), width=.25, 
+          aes(ymin=W_SAND-W_SAND.se, ymax=W_SAND+W_SAND.se)) +
+   labs(y="% Sand") +
+   scale_y_continuous(limits = c(0, 80))+
+   theme_bw()+
+   #theme(strip.text.x = element_blank()) +
+   theme(legend.position="none",axis.title.x = element_blank(),
+         axis.text.x=element_blank(),axis.ticks=element_blank()) 
+
+p3<-ggplot(fig.dat,aes(Variety,W_CLAY,fill=as.factor(Variety)))+
+   geom_bar(position="dodge",stat="identity") +
+   geom_bar(position=position_dodge(.9), colour="black", stat="identity") +
+   geom_errorbar(position=position_dodge(.9), width=.25, 
+          aes(ymin=W_CLAY-W_CLAY.se, ymax=W_CLAY+W_CLAY.se)) +
+   labs(y="% Clay") +
+   scale_y_continuous(limits = c(0, 17))+
+   theme_bw()+
+   #theme(strip.text.x = element_blank()) +
+   theme(legend.position="none",axis.title.x = element_blank(),
+         axis.text.x=element_blank(),axis.ticks=element_blank()) 
+
+p4<-ggplot(fig.dat,aes(Variety,W_WATER,fill=as.factor(Variety)))+
+   geom_bar(position="dodge",stat="identity") +
+   geom_bar(position=position_dodge(.9), colour="black", stat="identity") +
+   geom_errorbar(position=position_dodge(.9), width=.25, 
+          aes(ymin=W_WATER-W_WATER.se, ymax=W_WATER+W_WATER.se)) +
+   labs(y="Soil Water Content") +
+   #scale_y_continuous(limits = c(0, 1.25))+
+   theme_bw()+
+   theme(legend.position="none",axis.title.x = element_blank(),
+         axis.text.x=element_blank(),axis.ticks=element_blank())
+
+p5<-ggplot(fig.dat,aes(Variety,W_ESP,fill=as.factor(Variety)))+
+   geom_bar(position="dodge",stat="identity") +
+   geom_bar(position=position_dodge(.9), colour="black", stat="identity") +
+   geom_errorbar(position=position_dodge(.9), width=.25, 
+          aes(ymin=W_ESP-W_ESP.se, ymax=W_ESP+W_ESP.se)) +
+   labs(y="Exchangeable Sodium % \n (ESP)") +
+   #scale_y_continuous(limits = c(0, 35))+
+   theme_bw()+
+   #theme(strip.text.x = element_blank()) +
+   theme(legend.position="none",axis.title.x = element_blank(),
+         axis.text.x=element_blank(),axis.ticks=element_blank()) 
+
+p6<-ggplot(fig.dat,aes(Variety,TOPPH,fill=as.factor(Variety)))+
+   geom_bar(position="dodge",stat="identity") +
+   geom_bar(position=position_dodge(.9), colour="black", stat="identity") +
+   geom_errorbar(position=position_dodge(.9), width=.25, 
+          aes(ymin=TOPPH-TOPPH.se, ymax=TOPPH+TOPPH.se)) +
+   labs(y="pH") +
+   #scale_y_continuous(limits = c(0, 80))+
+   theme_bw()+
+   #theme(strip.text.x = element_blank()) +
+   theme(legend.position="none",axis.title.x = element_blank(),
+         axis.text.x=element_blank(),axis.ticks=element_blank()) 
+
+p7<-ggplot(fig.dat,aes(Variety,W_OC,fill=as.factor(Variety)))+
+   geom_bar(position="dodge",stat="identity") +
+   geom_bar(position=position_dodge(.9), colour="black", stat="identity") +
+   geom_errorbar(position=position_dodge(.9), width=.25, 
+          aes(ymin=W_OC-W_OC.se, ymax=W_OC+W_OC.se)) +
+   labs(y="Organic Carbon Content \n (g C kg-1)") +
+   #scale_y_continuous(limits = c(0, 1.25))+
+   theme_bw()+
+   theme(legend.position="none",axis.title.x = element_blank(),
+         axis.text.x=element_blank(),axis.ticks=element_blank())
+
+p8<-ggplot(fig.dat,aes(Variety,W_N,fill=as.factor(Variety)))+
+   geom_bar(position="dodge",stat="identity") +
+   geom_bar(position=position_dodge(.9), colour="black", stat="identity") +
+   geom_errorbar(position=position_dodge(.9), width=.25, 
+          aes(ymin=W_N-W_N.se, ymax=W_N+W_N.se)) +
+   labs(y="Total N (g kg-1)") +
+   #scale_y_continuous(limits = c(0, 35))+
+   theme_bw()+
+   #theme(strip.text.x = element_blank()) +
+   theme(legend.position="none",axis.title.x = element_blank(),
+         axis.text.x=element_blank(),axis.ticks=element_blank()) 
+
+p9<-ggplot(fig.dat,aes(Variety,W_CN,fill=as.factor(Variety)))+
+   geom_bar(position="dodge",stat="identity") +
+   geom_bar(position=position_dodge(.9), colour="black", stat="identity") +
+   geom_errorbar(position=position_dodge(.9), width=.25, 
+          aes(ymin=W_CN-W_CN.se, ymax=W_CN+W_CN.se)) +
+   labs(y="C/N Ratio") +
+   #scale_y_continuous(limits = c(0, 80))+
+   theme_bw()+
+   #theme(strip.text.x = element_blank()) +
+   theme(legend.position="none",axis.title.x = element_blank(),
+         axis.text.x=element_blank(),axis.ticks=element_blank()) 
+
+p10<-ggplot(fig.dat,aes(Variety,MeanTemp,fill=as.factor(Variety)))+
+   geom_bar(position="dodge",stat="identity") +
+   geom_bar(position=position_dodge(.9), colour="black", stat="identity") +
+   geom_errorbar(position=position_dodge(.9), width=.25, 
+          aes(ymin=MeanTemp-MeanTemp.se, ymax=MeanTemp+MeanTemp.se)) +
+   labs(y="Annual Mean \n Temperature (ºC)") +
+   scale_x_discrete(labels = c("var. clausa", "var. immuginata"))+
+   theme_bw()+
+   #theme(strip.text.x = element_blank()) +
+   theme(legend.position="none",axis.title.x = element_blank()) 
+
+p11<-ggplot(fig.dat,aes(Variety,MeanPrecip,fill=as.factor(Variety)))+
+   geom_bar(position="dodge",stat="identity") +
+   geom_bar(position=position_dodge(.9), colour="black", stat="identity") +
+   geom_errorbar(position=position_dodge(.9), width=.25, 
+          aes(ymin=MeanPrecip-MeanPrecip.se, ymax=MeanPrecip+MeanPrecip.se)) +
+   labs(y="Annual Mean \n Precipitation (mm)") +
+   scale_x_discrete(labels = c("var. clausa", "var. immuginata"))+
+   theme_bw()+
+   #theme(strip.text.x = element_blank()) +
+   theme(legend.position="none",axis.title.x = element_blank()) 
+```
+
+\clearpage
+
+```{r fig.width=11, fig.height=8.5, message=FALSE}
+library(cowplot)
+plot_grid(p1, p2, p3, 
+          p4, p5, p6,
+          p7, p8, p9, 
+          p10, p11,
+          ncol=3, align="hv")
+```
+
+\clearpage
+
+Can these variables be condensed into a single variable for exploration of the fungal community data?
+-------------------------------------------------
+OK, clearly it's important to condense this variability into a single axis. Since skewness and the magnitude of the variables influence the resulting PCs, it is good practice to apply skewness transformation, center and scale the variables prior to the application of PCA.
+```{r}
+library(stats)
+envi.pca<-prcomp(SP.envi[,c("W_WATER","W_SAND","W_SILT", "W_CLAY","W_ESP","TOPPH","W_OC","W_N","W_CN","MeanTemp","MeanPrecip")],center=TRUE,scale.=TRUE)
+print(envi.pca)
+```
+Determine how many PCs to retain for further analyses:
+```{r}
+plot(envi.pca, type = "l")
+summary(envi.pca)
+```
+The summary method describes the importance of the PCs. The first row describes the standard deviation associated with each PC. The second row shows the proportion of the variance in the data explained by each component while the third row describe the cumulative proportion of explained variance. We can see there that the first two PCs account for 84% of the variance of the data.
+
+Visualize with a biplot
+```{r message=FALSE}
+library(devtools)
+install_github("ggbiplot", "vqv")
+library(ggbiplot)
+source("/home/megan.rua/Dropbox/Experiments/2013 Sand Pine/Analyses/2013 Sand Pine/ggbiplot2.R")
+
+  
+g <- ggbiplot2(envi.pca, obs.scale = 1, var.scale = 1, 
+              groups = SP.envi$Variety, ellipse = TRUE, 
+              circle = FALSE) +
+  scale_color_discrete(name = '') + 
+  ylim(-4,3) +
+  theme(legend.direction = 'horizontal', legend.position = 'top') +
+  theme_bw()+
+  theme(legend.key = element_blank()) +
+  guides(colour=guide_legend(override.aes=list(linetype=c(0,0),shape=c(16,16),size=3)))
+g
+```
+
+Plot each variable coefficient inside a unit circle for insight into interpretation for PCs.
+```{r}
+require(ggplot2)
+ 
+theta <- seq(0,2*pi,length.out = 100)
+circle <- data.frame(x = cos(theta), y = sin(theta))
+p <- ggplot(circle,aes(x,y)) + geom_path()
+ 
+loadings <- data.frame(envi.pca$rotation, .names = row.names(envi.pca$rotation))
+loadings$names<-factor(loadings$.names,
+                        labels=c("Mean Precipitation","Mean Temperature","pH","% Clay", "C/N", "ESP", "Total N", "Organic C Content", "% Sand", "% Silt", "Soil Water Content"))
+p + geom_text(data=loadings, 
+              mapping=aes(x = PC1, y = PC2, label = names, colour = .names),
+              show_guide=FALSE) +
+  coord_fixed(ratio=1) +
+  labs(x = "PC1", y = "PC2")+
+  theme_bw() +
+  theme(legend.key = element_blank(),legend.title=element_blank()) 
+```
+
+How do environmental characteristics shape the mycorrhizal community?
+-------------------------------------------------
+Similar to the OTU analyses for question 1, I will be using an analysis of variance using distance matrices. This will allow me to partition distance matrices among sources of variation and fit linear models (e.g., factors, polynomial regression) to distance matrices. I will be using the **adonis** function in the **vegan** package which uses a permutation test with pseudo-F ratios.
+
+For this analysis will need the following data:
+  * OTU.raw = matrix of raw OTU abundances
+  * Variety = Pinus clausa var. immuginata vs.Pinus clausa var. clausa
+  * Texture Class = W_TEX_CLASS (from the WISE database) or TEX_CLASS (from HWSD) [categorical]
+  * Drainage = W_DRAIN [categorical]
+  * W_WATER = soil water content: W_WATER [continuous]
+  * Soil texture measurements = W_SAND, W_SILT, W_CLAY [continuous (%)]
+  * Exchangeable Sodium % = W_ESP [continuous (ESP)]
+  * pH = TOPPH [continuous]
+  * Organic Carbon Content = W_OC [continuous (g C kg-1)]
+  * Total N = W_N [continuous (g kg-1)]
+  * C/N Ratio = W_CN [continuous]
+  * Annual Mean Temperature = MeanTemp [continuous (ºC)]
+  * Annual Precipitation = MeanPrecip [continuous (mm)]
+
+Create OTU.raw dataframe:
+```{r}
+#work computer
+SP.OTU<-read.csv("/home/megan.rua/Dropbox/Experiments/2013 Sand Pine/2013 Sand Pine Morphotype Data 060115.csv",header=TRUE,sep=",",na.strings=c("","NA"))
+
+#root length
+SP.OTU$RL<-(3.14*SP.OTU$NRI*63.617)/(2*173.2)
+
+#colonization density=number of tips/RL
+SP.OTU$ColDen<-SP.OTU$Tips/SP.OTU$RL
+
+#specific root length=RL/weight
+SP.OTU$SRL<-SP.OTU$RL/SP.OTU$Root.Wgt
+
+#remove non myco
+SP.OTU.myco<-SP.OTU[SP.OTU$Myco=='y',]
+```
+
+Remove subset so data is a function of only tree
+```{r}
+library(reshape2)
+#First all variables that need means
+SP.myco.long <- melt(data=SP.OTU.myco, id.var=c("ID","Variety","Site","OTU","Family","Order","Class"),
+                  measure.vars=c("Diameter","RL", "ColDen","SRL"),
+                  variable.name="temp")
+SP.myco.wide<-dcast(SP.myco.long, ID + Variety + Site + OTU + Family + Order + Class~ temp, mean,value.var="value")
+
+#Then variables that need sums
+SP.myco.long2 <- melt(data=SP.OTU.myco, id.var=c("ID","Variety","Site","OTU","Family","Order","Class"), 
+                      measure.vars=c("Tips"),variable.name="temp")
+SP.myco.wide2<-dcast(SP.myco.long2, ID + Variety + Site + OTU + Family + Order + Class ~ temp, sum,
+                      value.var="value")
+
+SP.myco.ID<-data.frame(SP.myco.wide,Tips=SP.myco.wide2$Tips)
+SP.myco.ID<-SP.myco.ID[-c(2),]
+```
+
+And merge with the environment dataframe:
+```{r}
+SP.merge<-merge(SP.myco.ID, SP.envi, by='ID', all.y = F, all.x=F, sort=F )
+```
+
+Reshape the OTU matrix so it's a matrix of abundances
+```{r}
+library(reshape2)
+SP.OTU<-dcast(SP.merge,ID + Variety.x + Site.x + Diameter + W_TEX_CLASS + W_DRAIN + W_WATER + W_SAND + W_SILT + W_CLAY + W_ESP + TOPPH + W_OC + W_N + W_CN + MeanTemp + MeanPrecip ~ SP.merge$OTU,sum,value.var="Tips")
+```
+
+Run the permanova using 999 permutations to match the previous analysis:
+```{r message=FALSE, warning=FALSE}
+library(vegan)
+#Bray-Curtis Method for Community Data
+SP.ad<-adonis(SP.OTU[,18:317] ~ W_TEX_CLASS + W_DRAIN + W_WATER + W_SAND + W_SILT + W_CLAY + W_ESP + TOPPH + W_OC + W_N + W_CN + MeanTemp + MeanPrecip,data=SP.OTU,perm=999,method="bray")
+SP.ad
+```
+These results confuse me. It appears to be doing some sort of model selection but I can't tell from the documentation. Where did the rest of the variables go?
+
+```{r results='hide', message=FALSE, warning=TRUE,}
+set.seed(31)
+spp.ord<-metaMDS(SP.OTU[,18:317],distance="bray",trymax=999)
+str(spp.ord)
+stressplot(spp.ord)
+```
+Stress pattern is not too bad and the fits decent.
+
+```{r}
+#load libraries
+library(ggplot2)
+library(grid)
+
+#site data
+#dataframe of OTU scoes for plotting
+scrs<-as.data.frame(scores(spp.ord,display="sites")) 
+scrs<-cbind(scrs,Site=SP.OTU$Site, Variety=SP.OTU$Variety, WATER=SP.OTU$W_WATER, Temp=SP.OTU$MeanTemp) # making a column with OTU names
+#scrs$site.num <- rowSums(SP.OTU[,17:317]) #total abundances for each site
+
+#standard envfit
+vf<-envfit(spp.ord,SP.OTU[,18:317],perm=999)
+spp.scrs.sub<-as.data.frame(scores(vf,display="vectors"))
+spp.scrs<-data.frame(Species=rownames(spp.scrs.sub),NMDS1=spp.scrs.sub$NMDS1,NMDS2=spp.scrs.sub$NMDS2)
+
+
+p1<-ggplot(scrs) +
+  geom_point(mapping=aes(x=NMDS1,y=NMDS2,color=Variety),show_guide=FALSE) +
+  #coord_fixed()+ ##to maintain an aspect ratio of 1
+  geom_segment(data=spp.scrs,
+               aes(x=0,xend=NMDS1,y=0,yend=NMDS2),
+               arrow=arrow(length=unit(0.5,"cm")),color="grey",inherit_aes=FALSE)+
+  geom_text(data=spp.scrs,aes(x=NMDS1,y=NMDS2,label=Species),size=3)+
+  theme_bw() 
+
+p2<-ggplot(scrs) +
+  geom_point(mapping=aes(x=NMDS1,y=NMDS2,color=Variety)) +
+  #coord_fixed()+ ##to maintain an aspect ratio of 1
+  theme_bw()+
+  theme(legend.position=c(-0.05,1.1),legend.justification=c(0,1),
+                       legend.direction="vertical",
+                       legend.box="horizontal",
+                       legend.box.just = c("top"), 
+                       legend.background = element_rect(fill="transparent"),
+        legend.key = element_blank(),legend.title=element_blank())
+
+p3<-ggplot(scrs) +
+  geom_point(mapping=aes(x=NMDS1,y=NMDS2,color=WATER)) +
+  #coord_fixed()+ ##to maintain an aspect ratio of 1
+  theme_bw() +
+  theme(legend.position=c(1,1),legend.justification=c(1,1),
+                       legend.direction="vertical",
+                       legend.box="horizontal",
+                       legend.box.just = c("top"), 
+                       legend.background = element_rect(fill="transparent"))
+
+p4<-ggplot(scrs) +
+  geom_point(mapping=aes(x=NMDS1,y=NMDS2,color=Temp)) +
+  #coord_fixed()+ ##to maintain an aspect ratio of 1
+  theme_bw() +
+  theme(legend.position=c(1,1),legend.justification=c(1,1),
+                       legend.direction="vertical",
+                       legend.box="horizontal",
+                       legend.box.just = c("top"), 
+                       legend.background = element_rect(fill="transparent"))
+
+library(cowplot)
+plot_grid(p1,p2,p3,p4,
+          align="hv",
+          nrow=2)
+```
+
+Graph only considering variety and environmenta; variables:
+```{r}
+
+#standard envfit
+vf.envi<-envfit(spp.ord,SP.OTU[,5:17],perm=999)
+envi.scrs.sub<-as.data.frame(scores(vf.envi,display="vectors"))
+envi.scrs<-data.frame(Envi=rownames(envi.scrs.sub),NMDS1=envi.scrs.sub$NMDS1,NMDS2=envi.scrs.sub$NMDS2)
+envi.scrs$Envi<-factor(envi.scrs$Envi,
+                        labels=c("Mean Precipitation","Mean Temperature","pH","% Clay", "C/N", "ESP", "Total N", 
+                                 "Organic C Content", "% Sand", "% Silt", "Soil Water Content"))
+
+#all ellipse code modified from: https://oliviarata.wordpress.com/2014/04/17/ordinations-in-ggplot2/
+#taken from the excellent stackoverflow Q+A: http://stackoverflow.com/questions/13794419/plotting-ordiellipse-function-from-vegan-package-onto-nmds-plot-created-in-ggplo
+veganCovEllipse <- function (cov, center = c(0, 0), scale = 1, npoints = 100) 
+{
+  theta <- (0:npoints) * 2 * pi/npoints
+  Circle <- cbind(cos(theta), sin(theta))
+  t(center + scale * t(Circle %*% chol(cov)))
+}
+#data for ellipse, in this case using the site factor
+df_ell.variety <- data.frame() #sets up a data frame before running the function.
+for(g in levels(scrs$Variety)){
+  df_ell.variety <- rbind(df_ell.variety, 
+                       cbind(as.data.frame(with(scrs[scrs$Variety==g,],
+                            veganCovEllipse(cov.wt(cbind(NMDS1,NMDS2),wt=rep(1/length(NMDS1),length(NMDS1)))$cov,
+                                            center=c(mean(NMDS1),mean(NMDS2)))))
+                                      ,Variety=g))
+}
+
+# data for labelling the ellipse
+NMDS.mean.var=aggregate(scrs[ ,c("NMDS1", "NMDS2")], 
+                         list(group = scrs$Variety), mean)
+# data for labelling the ellipse
+NMDS.mean=aggregate(scrs[,c("NMDS1", "NMDS2")], 
+                    list(group = scrs$Variety), mean)  
+
+p.var.fung<-ggplot(scrs) +
+  geom_path(data = df_ell.variety, aes(x = NMDS1, y = NMDS2, group = Variety, color=Variety))+
+  geom_point(mapping=aes(x=NMDS1,y=NMDS2,color=Variety)) +
+  #coord_fixed()+ ##to maintain an aspect ratio of 1
+  geom_segment(data=envi.scrs,
+               aes(x=0,xend=NMDS1,y=0,yend=NMDS2),
+               arrow=arrow(length=unit(0.5,"cm")),color="grey",inherit_aes=FALSE)+
+  geom_text(data=envi.scrs,aes(x=NMDS1,y=NMDS2,label=Envi),size=3)+
+  theme_bw()+
+  theme(legend.key = element_blank()) +
+  guides(colour=guide_legend(override.aes=list(linetype=c(0,0),shape=c(16,16),size=3)))
+p.var.fung
+```
+
+#### *What OTUs are driving this pattern?*
+Can't do a true indicator analysis to see if there is an OTU strongly associated with an environmental variable so look at correlations (knedall, spearman, or pearson).
+
+```{r fig.width = 9, fig.height = 11}
+library(reshape2)
+SP.OTU.cor<-cor(SP.OTU[,18:317],SP.OTU[,7:17])
+SP.OTU.cor2<-melt(SP.OTU.cor)
+SP.OTU.cor2$Y1<-cut(SP.OTU.cor2$value,breaks=10,right=FALSE)
+row
+
+ggplot(SP.OTU.cor2, aes(Var2, Var1)) + 
+  geom_tile(aes(fill=value)) + 
+  scale_fill_gradient2("Correlation",midpoint=0,high="#B2182B",low="#2166AC") +
+  scale_x_discrete(expand = c(0, 0),breaks=c("W_WATER", "W_SAND", "W_SILT","W_CLAY","W_ESP","TOPPH","W_OC", "W_N","W_CN","MeanTemp","MeanPrecip"),labels=c("Soil Water \nContent", "% Sand", "% Silt","% Clay", "ESP", "pH", "Soil Organic \nContent", "Nitrogen", "C/N", "Mean \nTemperature", "Mean \nPrecipitation"))+
+  ylim(rev(levels(SP.OTU.cor2$Var1))) +
+  xlab("Environmental Characteristics") +
+  ylab("OTU") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(), panel.background = element_blank())
+``
